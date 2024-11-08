@@ -8,9 +8,14 @@ from time import sleep
 import requests
 from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
+from stqdm import stqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from streamlit_echarts import st_echarts
+import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.curdir))
+
+# st.set_page_config(layout="wide")
 
 
 # Bigquery
@@ -75,7 +80,7 @@ class api_mercado_livre:
 
             headers = {
                 "Accept": "application/json",
-                "Authorization": f"Bearer APP_USR-8541254073775405-110608-5dd6f9fb5f8a5851f7d04d87e89e23fb-1023158880",
+                "Authorization": f"Bearer APP_USR-8541254073775405-110808-1cf82dadedef2ab6b287ea7fe56b90dc-1023158880",
             }
 
             response = requests.get(url, headers=headers)
@@ -220,11 +225,11 @@ class api_mercado_livre:
 
 
 # Main
-def get_last_six_months_intervals():
+def get_last_months_intervals():
     intervals = []
     current_month = datetime.now().replace(day=1)
 
-    for i in range(6):
+    for i in range(8):
         first_day = current_month - relativedelta(months=1)
         last_day = current_month - relativedelta(days=1)
         date_from = first_day.strftime("%Y-%m-%dT00:00:00.000-00:00")
@@ -277,65 +282,354 @@ def requisitando_fornecedor(id_fornecedor):
     )
 
 
-# Calcula os intervalos de datas apenas uma vez fora do loop
-intervals = get_last_six_months_intervals()
+def preencher_visitas(df, colunas_visitas):
+    """
+    Preenche valores nulos representados como 0 nas colunas de visitas mensais
+    usando interpolação linear e preenchimento nas extremidades.
 
-# Pré-carrega os anúncios e fornecedores em paralelo
-lista = []
-scroll_id = ""
-with ThreadPoolExecutor() as executor:
-    futures = [
-        executor.submit(requisitando_lista, "MLB7073", scroll_id) for _ in range(10)
-    ]
-    for future in as_completed(futures):
-        response = future.result()
-        lista.extend(response.get("results", []))
-        scroll_id = response.get("scroll_id", "")
+    Parâmetros:
+    - df: DataFrame contendo as colunas de visitas mensais.
+    - colunas_visitas: Lista de colunas de visitas mensais a serem tratadas.
 
-# Coleta as informações de cada anúncio em paralelo
-relatorio = []
-with ThreadPoolExecutor() as executor:
-    futures = []
-    for anuncio in lista:
-        id_anuncio = anuncio.get("id", "")
-        id_fornecedor = anuncio.get("seller", {}).get("id", "")
+    Retorno:
+    - DataFrame com valores preenchidos nas colunas especificadas.
+    """
+    # Substituir valores 0 por NaN nas colunas de visitas
+    df[colunas_visitas] = df[colunas_visitas].replace(0, np.nan)
 
-        # Paraleliza as requisições de visitas e fornecedor
-        futures.append(
-            executor.submit(
-                lambda anuncio, id_anuncio, id_fornecedor: {
-                    "id": id_anuncio,
-                    "preco": anuncio["price"],
-                    "ean": str(
-                        next(
-                            (
-                                attribute["source"]
-                                for attribute in anuncio["attributes"]
-                                if attribute["id"] == "GTIN"
-                            ),
-                            None,
-                        )
-                    ),
-                    "catalogo": anuncio["catalog_listing"],
-                    "qualidade": requisitando_qualidades_anuncios(id_anuncio),
-                    "tipo_logistico": anuncio["shipping"]["logistic_type"],
-                    "tipo_anuncio": anuncio["listing_type_id"],
-                    "id_seller": id_fornecedor,
-                    "nome_seller": requisitando_fornecedor(id_fornecedor)["nickname"],
-                    "nivel_seller": requisitando_fornecedor(id_fornecedor)[
-                        "seller_reputation"
-                    ]["power_seller_status"],
-                    "reputacao_seller": requisitando_fornecedor(id_fornecedor)[
-                        "seller_reputation"
-                    ]["level_id"],
-                    **requisitando_visitas_anuncios(id_anuncio, intervals),
+    # Interpolação linear ao longo das colunas (horizontalmente)
+    df[colunas_visitas] = df[colunas_visitas].interpolate(method="linear", axis=1)
+
+    # Preenchimento nas extremidades (backfill e forward fill)
+    df[colunas_visitas] = (
+        df[colunas_visitas]
+        .fillna(method="bfill", axis=1)
+        .fillna(method="ffill", axis=1)
+    )
+
+    df[colunas_visitas] = df[colunas_visitas].round(0)
+
+    return df
+
+
+def requisitando_codigo_categoria(query):
+    url = f"https://api.mercadolibre.com/sites/MLB/domain_discovery/search?q={query}"
+    response = api_mercado_livre().get(url)
+
+    return {item["domain_name"]: item["category_id"] for item in response}
+
+
+def requisitar_relatorio(categoria):
+    # Calcula os intervalos de datas apenas uma vez fora do loop
+    intervals = get_last_months_intervals()
+
+    # Pré-carrega os anúncios e fornecedores em paralelo
+    lista = []
+    scroll_id = ""
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(requisitando_lista, categoria, scroll_id) for _ in range(5)
+        ]
+        for future in as_completed(futures):
+            response = future.result()
+            lista.extend(response.get("results", []))
+            scroll_id = response.get("scroll_id", "")
+
+    # Coleta as informações de cada anúncio em paralelo
+    relatorio = []
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        for anuncio in lista:
+            id_anuncio = anuncio.get("id", "")
+            id_fornecedor = anuncio.get("seller", {}).get("id", "")
+
+            # Paraleliza as requisições de visitas e fornecedor
+            futures.append(
+                executor.submit(
+                    lambda anuncio, id_anuncio, id_fornecedor: {
+                        "id": id_anuncio,
+                        "preco": anuncio["price"],
+                        "ean": str(
+                            next(
+                                (
+                                    attribute["source"]
+                                    for attribute in anuncio["attributes"]
+                                    if attribute["id"] == "GTIN"
+                                ),
+                                None,
+                            )
+                        ),
+                        "catalogo": anuncio["catalog_listing"],
+                        "qualidade": requisitando_qualidades_anuncios(id_anuncio),
+                        "tipo_logistico": anuncio["shipping"]["logistic_type"],
+                        "tipo_anuncio": anuncio["listing_type_id"],
+                        "id_seller": id_fornecedor,
+                        "nome_seller": requisitando_fornecedor(id_fornecedor)[
+                            "nickname"
+                        ],
+                        "nivel_seller": requisitando_fornecedor(id_fornecedor)[
+                            "seller_reputation"
+                        ]["power_seller_status"],
+                        "reputacao_seller": requisitando_fornecedor(id_fornecedor)[
+                            "seller_reputation"
+                        ]["level_id"],
+                        **requisitando_visitas_anuncios(id_anuncio, intervals),
+                    },
+                    anuncio,
+                    id_anuncio,
+                    id_fornecedor,
+                )
+            )
+
+        # Processa o relatório à medida que as requisições terminam
+        for future in stqdm(as_completed(futures), total=len(lista)):
+            relatorio.append(future.result())
+
+    return pd.DataFrame(relatorio)
+
+
+def options_pie(name, data):
+    return {
+        "tooltip": {"trigger": "item"},
+        "series": [
+            {
+                "name": f"{name}",
+                "type": "pie",
+                "radius": ["40%", "70%"],
+                "avoidLabelOverlap": False,
+                "itemStyle": {
+                    "borderRadius": 10,
+                    "borderColor": "#fff",
                 },
-                anuncio,
-                id_anuncio,
-                id_fornecedor,
+                "label": {"show": False, "position": "center"},
+                "emphasis": {
+                    "label": {"show": True, "fontSize": "10", "fontWeight": "bold"}
+                },
+                "labelLine": {"show": False},
+                "data": data,
+            }
+        ],
+    }
+
+
+# Título da aplicação
+st.title("Gerador de DataFrame")
+
+requisicao = st.text_input("Pesquise a categoria")
+
+
+if st.button("Pesquisar categoria"):
+    categorias = requisitando_codigo_categoria(requisicao)
+    categoria_selecionada = st.selectbox(
+        "Qual categoria você deseja?",
+        tuple(categorias.keys()),
+        index=None,
+        placeholder="Selecione uma categoria",
+    )
+
+st.write(categoria_selecionada)
+
+if categoria_selecionada:
+    df = requisitar_relatorio(categorias[categoria_selecionada])
+
+    colunas_visitas = [
+        "visita_mes_1",
+        "visita_mes_2",
+        "visita_mes_3",
+        "visita_mes_4",
+        "visita_mes_5",
+        "visita_mes_6",
+        "visita_mes_7",
+        "visita_mes_8",
+    ]
+
+    df = preencher_visitas(df, colunas_visitas)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.metric(label="preço médio", value=f"R$ {round(df["preco"].mean(),2)}")
+
+    with col2:
+        st.metric(label="variação de preço", value=f"R$ {round(df['preco'].std(),2)}")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("Anúncios no catalogo")
+
+        st_echarts(
+            options=options_pie(
+                "catálogo",
+                [
+                    {"name": name, "value": count}
+                    for name, count in (
+                        df["catalogo"].value_counts(normalize=True) * 100
+                    )
+                    .round(2)
+                    .items()
+                ],
             )
         )
 
-    # Processa o relatório à medida que as requisições terminam
-    for future in tqdm(as_completed(futures), total=len(lista)):
-        relatorio.append(future.result())
+    with col2:
+        st.markdown("Tipos logísticos")
+
+        nome_tipo_logistico = {
+            "xd_drop_off": "Coleta",
+            "cross_docking": "cross docking",
+            "drop_off": "Ponto de Coleta",
+        }
+
+        df["tipo_logistico"] = df["tipo_logistico"].replace(nome_tipo_logistico)
+
+        st_echarts(
+            options=options_pie(
+                "tipo logistico",
+                [
+                    {"name": name, "value": count}
+                    for name, count in (
+                        df["tipo_logistico"].value_counts(normalize=True) * 100
+                    )
+                    .round(2)
+                    .items()
+                ],
+            )
+        )
+
+    with col3:
+        st.markdown("Tipos de anúncios")
+
+        nome_tipo_anuncio = {
+            "gold_special": "classico",
+            "gold_pro": "premium",
+        }
+
+        df["tipo_anuncio"] = df["tipo_anuncio"].replace(nome_tipo_anuncio)
+
+        st_echarts(
+            options=options_pie(
+                "tipo anúncio",
+                [
+                    {"name": name, "value": count}
+                    for name, count in (
+                        df["tipo_anuncio"].value_counts(normalize=True) * 100
+                    )
+                    .round(2)
+                    .items()
+                ],
+            )
+        )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("Niveis dos vendedores")
+
+        nome_nivel_vendedores = {
+            "5_green": "5 estrelas",
+            "4_light_green": "4 estrelas",
+            "3_yellow": "3 estrelas",
+            "2_light_green": "novo_nome4",
+            "1_green": "novo_nome5",
+            "0_green": "novo_nome6",
+        }
+
+        df["nivel_seller"] = df["nivel_seller"].replace(nome_nivel_vendedores)
+
+        st_echarts(
+            options=options_pie(
+                "nivel seller",
+                [
+                    {"name": name, "value": count}
+                    for name, count in (
+                        df["nivel_seller"].value_counts(normalize=True) * 100
+                    )
+                    .round(2)
+                    .items()
+                ],
+            )
+        )
+
+    with col2:
+        st.markdown("Reputação dos sellers")
+        st_echarts(
+            options=options_pie(
+                "reputação seller",
+                [
+                    {"name": name, "value": count}
+                    for name, count in (
+                        df["reputacao_seller"].value_counts(normalize=True) * 100
+                    )
+                    .round(2)
+                    .items()
+                ],
+            )
+        )
+
+    st.markdown("### Vendas nos ultimos 6 meses")
+
+    options = {
+        "title": {"text": "Média de visitas de um anúncio"},
+        "tooltip": {
+            "trigger": "axis",
+            "axisPointer": {
+                "type": "cross",
+                "label": {"backgroundColor": "#6a7985"},
+            },
+        },
+        "legend": {"data": ["visitas"]},
+        "toolbox": {"feature": {"saveAsImage": {}}},
+        "grid": {"left": "3%", "right": "4%", "bottom": "3%", "containLabel": True},
+        "xAxis": [
+            {
+                "type": "category",
+                "boundaryGap": False,
+                "data": [
+                    "mes 1",
+                    "mes 2",
+                    "mes 3",
+                    "mes 4",
+                    "mes 5",
+                    "mes 6",
+                    "mes 7",
+                    "mes 8",
+                ],
+            }
+        ],
+        "yAxis": [{"type": "value"}],
+        "series": [
+            {
+                "name": "Visitas",
+                "type": "line",
+                "stack": "Visitas",
+                "areaStyle": {},
+                "emphasis": {"focus": "series"},
+                "data": df[
+                    [
+                        "visita_mes_1",
+                        "visita_mes_2",
+                        "visita_mes_3",
+                        "visita_mes_4",
+                        "visita_mes_5",
+                        "visita_mes_6",
+                        "visita_mes_7",
+                        "visita_mes_8",
+                    ]
+                ]
+                .mean(axis=0)
+                .to_list(),
+            }
+        ],
+    }
+
+    st_echarts(options=options)
+
+    col1, col2 = st.columns(2)
+else:
+    st.warning("Por favor, insira o nome da coluna.")
+
+
+# arredonadar os vados dads visitas
+# mudar os nomes dos graficos de rosca
+# mudar para porcentagem os graficos de rosca
