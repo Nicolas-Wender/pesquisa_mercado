@@ -12,6 +12,7 @@ from stqdm import stqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_echarts import st_echarts
 import numpy as np
+from streamlit_extras.metric_cards import style_metric_cards
 
 sys.path.insert(0, os.path.abspath(os.curdir))
 
@@ -80,7 +81,7 @@ class api_mercado_livre:
 
             headers = {
                 "Accept": "application/json",
-                "Authorization": f"Bearer APP_USR-8541254073775405-110808-1cf82dadedef2ab6b287ea7fe56b90dc-1023158880",
+                "Authorization": f"Bearer APP_USR-8541254073775405-111214-5b54cb35d799b4f97479f01051079917-1023158880",
             }
 
             response = requests.get(url, headers=headers)
@@ -328,7 +329,7 @@ def requisitar_relatorio(categoria):
     scroll_id = ""
     with ThreadPoolExecutor() as executor:
         futures = [
-            executor.submit(requisitando_lista, categoria, scroll_id) for _ in range(5)
+            executor.submit(requisitando_lista, categoria, scroll_id) for _ in range(1) #colocar as 5 primeiras páginas
         ]
         for future in as_completed(futures):
             response = future.result()
@@ -415,22 +416,47 @@ def options_pie(name, data):
 # Título da aplicação
 st.title("Gerador de DataFrame")
 
-requisicao = st.text_input("Pesquise a categoria")
 
+if "pesquisar_categoria" not in st.session_state:
+    st.session_state.pesquisar_categoria = False
 
-if st.button("Pesquisar categoria"):
-    categorias = requisitando_codigo_categoria(requisicao)
+if "pesquisar_metricas" not in st.session_state:
+    st.session_state.pesquisar_metricas = False
+
+with st.form("Pesquise a categoria"):
+    requisicao = st.text_input("Pesquise a categoria")
+
+    if st.form_submit_button("Pesquisar categoria"):
+        if requisicao != "":
+            st.session_state.pesquisar_categoria = requisicao
+        else:
+            st.warning("Por favor, insira o nome da coluna.")
+
+if st.session_state.pesquisar_categoria and "categorias" not in st.session_state:
+    try:
+        st.session_state.categorias = requisitando_codigo_categoria(
+            st.session_state.pesquisar_categoria
+        )
+        st.session_state.pesquisar_categoria = False
+    except Exception as e:
+        st.warning("Algo deu errado... entre em contato com o suporte.")
+
+if "categorias" in st.session_state:
     categoria_selecionada = st.selectbox(
         "Qual categoria você deseja?",
-        tuple(categorias.keys()),
-        index=None,
+        tuple(st.session_state.categorias.keys()),
         placeholder="Selecione uma categoria",
     )
 
-st.write(categoria_selecionada)
+    if st.button("Pesquisar métricas"):
+        if categoria_selecionada:
+            st.session_state.pesquisar_metricas = True
+        else:
+            st.warning("Por favor, selecione uma categoria")
 
-if categoria_selecionada:
-    df = requisitar_relatorio(categorias[categoria_selecionada])
+
+if st.session_state.pesquisar_metricas:
+    df = requisitar_relatorio(st.session_state.categorias[categoria_selecionada])
 
     colunas_visitas = [
         "visita_mes_1",
@@ -447,11 +473,10 @@ if categoria_selecionada:
 
     col1, col2 = st.columns(2)
 
-    with col1:
-        st.metric(label="preço médio", value=f"R$ {round(df["preco"].mean(),2)}")
+    col1.metric(label="preço médio", value=f"R$ {round(df["preco"].mean(),2)}")
+    col2.metric(label="variação de preço", value=f"R$ {round(df['preco'].std(),2)}")
 
-    with col2:
-        st.metric(label="variação de preço", value=f"R$ {round(df['preco'].std(),2)}")
+    style_metric_cards(background_color="#262730")
 
     col1, col2, col3 = st.columns(3)
 
@@ -466,7 +491,7 @@ if categoria_selecionada:
                     for name, count in (
                         df["catalogo"].value_counts(normalize=True) * 100
                     )
-                    .round(2)
+                    .round()
                     .items()
                 ],
             )
@@ -477,8 +502,10 @@ if categoria_selecionada:
 
         nome_tipo_logistico = {
             "xd_drop_off": "Coleta",
-            "cross_docking": "cross docking",
+            "cross_docking": "Cross docking",
             "drop_off": "Ponto de Coleta",
+            "not_specified": "Não especificado",
+            "custom": "Customizado",
         }
 
         df["tipo_logistico"] = df["tipo_logistico"].replace(nome_tipo_logistico)
@@ -491,7 +518,7 @@ if categoria_selecionada:
                     for name, count in (
                         df["tipo_logistico"].value_counts(normalize=True) * 100
                     )
-                    .round(2)
+                    .round()
                     .items()
                 ],
             )
@@ -515,7 +542,7 @@ if categoria_selecionada:
                     for name, count in (
                         df["tipo_anuncio"].value_counts(normalize=True) * 100
                     )
-                    .round(2)
+                    .round()
                     .items()
                 ],
             )
@@ -545,7 +572,7 @@ if categoria_selecionada:
                     for name, count in (
                         df["nivel_seller"].value_counts(normalize=True) * 100
                     )
-                    .round(2)
+                    .round()
                     .items()
                 ],
             )
@@ -561,16 +588,16 @@ if categoria_selecionada:
                     for name, count in (
                         df["reputacao_seller"].value_counts(normalize=True) * 100
                     )
-                    .round(2)
+                    .round()
                     .items()
                 ],
             )
         )
 
-    st.markdown("### Vendas nos ultimos 6 meses")
+    st.markdown("### Média das visitas nos ultimos 8 meses")
 
     options = {
-        "title": {"text": "Média de visitas de um anúncio"},
+        "title": {"text": ""},
         "tooltip": {
             "trigger": "axis",
             "axisPointer": {
@@ -626,10 +653,8 @@ if categoria_selecionada:
     st_echarts(options=options)
 
     col1, col2 = st.columns(2)
-else:
-    st.warning("Por favor, insira o nome da coluna.")
 
 
-# arredonadar os vados dads visitas
+# arredonadar os dados das visitas
 # mudar os nomes dos graficos de rosca
 # mudar para porcentagem os graficos de rosca
