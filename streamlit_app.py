@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_echarts import st_echarts
 import numpy as np
 from streamlit_extras.metric_cards import style_metric_cards
+import statistics
 
 sys.path.insert(0, os.path.abspath(os.curdir))
 
@@ -81,7 +82,7 @@ class api_mercado_livre:
 
             headers = {
                 "Accept": "application/json",
-                "Authorization": f"Bearer APP_USR-8541254073775405-111214-5b54cb35d799b4f97479f01051079917-1023158880",
+                "Authorization": f"Bearer APP_USR-8541254073775405-111312-276bf3b05e77acaf6cff6b04daec06f2-1023158880",
             }
 
             response = requests.get(url, headers=headers)
@@ -302,11 +303,7 @@ def preencher_visitas(df, colunas_visitas):
     df[colunas_visitas] = df[colunas_visitas].interpolate(method="linear", axis=1)
 
     # Preenchimento nas extremidades (backfill e forward fill)
-    df[colunas_visitas] = (
-        df[colunas_visitas]
-        .fillna(method="bfill", axis=1)
-        .fillna(method="ffill", axis=1)
-    )
+    df[colunas_visitas] = df[colunas_visitas].bfill(axis=1).ffill(axis=1)
 
     df[colunas_visitas] = df[colunas_visitas].round(0)
 
@@ -329,7 +326,8 @@ def requisitar_relatorio(categoria):
     scroll_id = ""
     with ThreadPoolExecutor() as executor:
         futures = [
-            executor.submit(requisitando_lista, categoria, scroll_id) for _ in range(1) #colocar as 5 primeiras páginas
+            executor.submit(requisitando_lista, categoria, scroll_id)
+            for _ in range(1)  # colocar as 5 primeiras páginas
         ]
         for future in as_completed(futures):
             response = future.result()
@@ -414,7 +412,7 @@ def options_pie(name, data):
 
 
 # Título da aplicação
-st.title("Gerador de DataFrame")
+st.title("Pesquisa de Mercado")
 
 
 if "pesquisar_categoria" not in st.session_state:
@@ -456,7 +454,13 @@ if "categorias" in st.session_state:
 
 
 if st.session_state.pesquisar_metricas:
-    df = requisitar_relatorio(st.session_state.categorias[categoria_selecionada])
+    st.session_state.df = requisitar_relatorio(
+        st.session_state.categorias[categoria_selecionada]
+    )
+    st.session_state.pesquisar_metricas = False
+
+if "df" in st.session_state:
+    df = st.session_state.df
 
     colunas_visitas = [
         "visita_mes_1",
@@ -645,6 +649,7 @@ if st.session_state.pesquisar_metricas:
                     ]
                 ]
                 .mean(axis=0)
+                .round(2)
                 .to_list(),
             }
         ],
@@ -652,7 +657,85 @@ if st.session_state.pesquisar_metricas:
 
     st_echarts(options=options)
 
-    col1, col2 = st.columns(2)
+    media_visitas = round(
+        statistics.mean(
+            df[
+                [
+                    "visita_mes_1",
+                    "visita_mes_2",
+                    "visita_mes_3",
+                    "visita_mes_4",
+                    "visita_mes_5",
+                    "visita_mes_6",
+                    "visita_mes_7",
+                    "visita_mes_8",
+                ]
+            ]
+            .mean(axis=0)
+            .to_list()
+        ),
+        2,
+    )
+
+    st.markdown("## Simule suas vendas")
+
+    custo_unitario = st.number_input(
+        "Custo unitário do produto", min_value=0.0, step=1.00, format="%.2f"
+    )
+
+    pedido_minimo = st.number_input("Pedido mínimo de compra", min_value=1, step=1)
+
+    porcentagem_custo = st.number_input(
+        "Percentual de custo", min_value=0.0, step=1.00, format="%.2f"
+    )
+
+    if st.button("Simular", type="primary"):
+        col1, col2, col3 = st.columns(3)
+
+        preco_medio = round(df["preco"].mean(), 2)
+        rs_estoque = round(custo_unitario * pedido_minimo, 2)
+        projecao_vendas_qtd = round((media_visitas * 0.05))
+        projecao_vendas_rs = projecao_vendas_qtd * preco_medio
+        retorno = (
+            preco_medio
+            - (preco_medio * 0.12)
+            - 6
+            - (preco_medio * (porcentagem_custo / 100))
+        ) * pedido_minimo
+
+        col1.metric(
+            label="R$ em estoque",
+            value=f"R$ {rs_estoque}",
+        )
+        col2.metric(label="Projeção vendas qtd (mês)", value=f"{projecao_vendas_qtd}")
+        col3.metric(
+            label="Projeção vendas R$ (mês)",
+            value=f"R$ {projecao_vendas_rs}",
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            label="Projeção retorno R$",
+            value=f"R$ {round(retorno - rs_estoque, 2)}",
+        )
+
+        col2.metric(
+            label="Dias de estoque",
+            value=f"{round(rs_estoque / (projecao_vendas_rs/30))}",
+        )
+
+        col3.metric(
+            label="Projeção rendimento",
+            value=f"{round(((projecao_vendas_qtd * (
+                preco_medio
+                - (preco_medio * 0.12)
+                - 6
+                - (preco_medio * (porcentagem_custo / 100))
+            ) ) / rs_estoque) *100, 2)} %",
+        )
+
+    # style_metric_cards(background_color="#262730")
 
 
 # arredonadar os dados das visitas
